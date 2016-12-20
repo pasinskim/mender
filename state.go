@@ -131,9 +131,10 @@ import (
 // state context carrying over data that may be used by all state handlers
 type StateContext struct {
 	// data store access
-	store               Store
-	lastUpdateCheck     time.Time
-	lastInventoryUpdate time.Time
+	store                Store
+	lastUpdateCheck      time.Time
+	lastInventoryUpdate  time.Time
+	fetchInstallAttempts int
 }
 
 type State interface {
@@ -462,7 +463,7 @@ func (u *UpdateFetchState) Handle(ctx *StateContext, c Controller) (State, bool)
 	in, size, err := c.FetchUpdate(u.update.URI())
 	if err != nil {
 		log.Errorf("update fetch failed: %s", err)
-		return NewUpdateErrorState(NewTransientError(err), u.update), false
+		return NewFetchInstallRetryState(u, u.update, NewTransientError(err)), false
 	}
 
 	return NewUpdateInstallState(in, size, u.update), false
@@ -515,10 +516,62 @@ func (u *UpdateInstallState) Handle(ctx *StateContext, c Controller) (State, boo
 
 	if err := c.InstallUpdate(u.imagein, u.size); err != nil {
 		log.Errorf("update install failed: %s", err)
-		return NewUpdateErrorState(NewTransientError(err), u.update), false
+		return NewFetchInstallRetryState(u, u.update, NewTransientError(err)), false
 	}
 
 	return NewRebootState(u.update), false
+}
+
+type FetchInstallRetryState struct {
+	CancellableState
+
+	from   State
+	update client.UpdateResponse
+	err    menderError
+}
+
+func NewFetchInstallRetryState(from State, update client.UpdateResponse,
+	err menderError) State {
+	return &FetchInstallRetryState{
+		CancellableState: NewCancellableState(BaseState{
+			id: MenderStateCheckWait,
+		}),
+		from:   from,
+		update: update,
+		err:    err,
+	}
+}
+
+// getFetchInstallRetry will return for the standard interval which is
+// 30 minutes the series 3, 6, 9, 12, 15, 30, 30, ...
+func getFetchInstallRetry(tried int, interval time.Duration) (time.Duration, error) {
+	maxRetyAttempts := 10
+
+	if tried == maxRetyAttempts {
+		return time.Second * 0, errors.New("")
+	}
+
+	i := interval / time.Duration(10*tried)
+	if i > interval/time.Duration(2) {
+		return interval, nil
+	}
+	return interval / time.Duration(10*tried), nil
+}
+
+func (fir *FetchInstallRetryState) Handle(ctx *StateContext, c Controller) (State, bool) {
+	intvl, err := getFetchInstallRetry(ctx.fetchInstallAttempts, c.GetUpdatePollInterval())
+	if err != nil {
+		ctx.fetchInstallAttempts = 0
+		if fir.err != nil {
+			return NewErrorState(fir.err), false
+		}
+		return NewErrorState(NewTransientError(err)), false
+	}
+
+	ctx.fetchInstallAttempts++
+
+	log.Debugf("wait %v before next fetch/install attempt", intvl)
+	return fir.StateAfterWait(NewUpdateFetchState(fir.update), fir, intvl)
 }
 
 type CheckWaitState struct {
