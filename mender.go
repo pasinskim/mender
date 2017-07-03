@@ -646,5 +646,5 @@ func (m *mender) CheckScriptsCompatibility() error {
 
 func (m *mender) InstallUpdate(from io.ReadCloser, size int64) error {
 	return installer.Install(from, m.GetDeviceType(),
-		m.GetArtifactVerifyKey(), m.stateScriptPath, m.UInstallCommitRebooter)
+		m.GetArtifactVerifyKey(), m.stateScriptPath, m.UInstallCommitRebooter, true)
 }
